@@ -14,8 +14,17 @@ import (
 )
 
 func Validate(rule config.Rule, truePositives []string, falsePositives []string) *config.Rule {
+	return ValidateComposite(rule, nil, truePositives, falsePositives)
+}
+
+func ValidateComposite(rule config.Rule, requiredRules []*config.Rule, truePositives []string, falsePositives []string) *config.Rule {
 	r := &rule
-	d := createSingleRuleDetector(r)
+	evalRule := rule
+	// If validating a helper rule in isolation, allow it to report so its regex/entropy can be validated.
+	if len(requiredRules) == 0 && evalRule.SkipReport {
+		evalRule.SkipReport = false
+	}
+	d := createRuleDetector(&evalRule, requiredRules...)
 	for _, tp := range truePositives {
 		if len(d.DetectString(tp)) < 1 {
 			logging.Fatal().
@@ -35,12 +44,14 @@ func Validate(rule config.Rule, truePositives []string, falsePositives []string)
 				Msg("Failed to Validate. False positive was detected by regex.")
 		}
 	}
+	// Ensure keywords on r itself are normalized just like createRuleDetector did on evalRule.
+	r.Keywords = evalRule.Keywords
 	return r
 }
 
 func ValidateWithPaths(rule config.Rule, truePositives map[string]string, falsePositives map[string]string) *config.Rule {
 	r := &rule
-	d := createSingleRuleDetector(r)
+	d := createRuleDetector(r)
 	for path, tp := range truePositives {
 		f := detect.Fragment{Raw: tp, FilePath: path}
 		if len(d.Detect(f)) != 1 {
@@ -66,25 +77,29 @@ func ValidateWithPaths(rule config.Rule, truePositives map[string]string, falseP
 	return r
 }
 
-func createSingleRuleDetector(r *config.Rule) *detect.Detector {
+func createRuleDetector(r *config.Rule, auxRules ...*config.Rule) *detect.Detector {
 	// normalize keywords like in the config package
 	var (
 		uniqueKeywords = make(map[string]struct{})
-		keywords       []string
+		rules          = make(map[string]config.Rule, 1+len(auxRules))
 	)
-	for _, keyword := range r.Keywords {
-		k := strings.ToLower(keyword)
-		if _, ok := uniqueKeywords[k]; ok {
-			continue
+	allRules := append([]*config.Rule{r}, auxRules...)
+	for _, rule := range allRules {
+		var keywords []string
+		seen := make(map[string]struct{})
+		for _, keyword := range rule.Keywords {
+			k := strings.ToLower(keyword)
+			uniqueKeywords[k] = struct{}{}
+			if _, ok := seen[k]; ok {
+				continue
+			}
+			keywords = append(keywords, k)
+			seen[k] = struct{}{}
 		}
-		keywords = append(keywords, k)
-		uniqueKeywords[k] = struct{}{}
+		rule.Keywords = keywords
+		rules[rule.RuleID] = *rule
 	}
-	r.Keywords = keywords
 
-	rules := map[string]config.Rule{
-		r.RuleID: *r,
-	}
 	cfg := base.CreateGlobalConfig()
 	cfg.Rules = rules
 	cfg.Keywords = uniqueKeywords
